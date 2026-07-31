@@ -97,7 +97,7 @@ const DOMAIN_RULES = [
     hosts: ['facebook.com', 'fb.com', 'instagram.com', 'threads.net', 'threads.com', 'messenger.com'],
     params: [
       'xmt', // Threads 新版合併追蹤字串
-      'lsof', // App 分享選單帶的來源標記（Threads / Instagram）
+      'slof', // App 分享選單帶的來源標記（Threads / Instagram）
       'mibextid', 'rdid', 'share_url', 'comment_tracking', 'notif_id', 'notif_t',
       'ref', 'refsrc', 'hrc', 'dti', 'app', 'video_source', 'ftentidentifier',
       'pageid', 'padding', 'ls_ref', 'action_history', 'tracking', 'referral_code',
