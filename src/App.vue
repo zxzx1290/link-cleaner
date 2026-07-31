@@ -746,10 +746,10 @@ const others = computed(() => {
 
 const toastText = ref('');
 let toastTimer;
-function toast(message) {
+function toast(message, ms = 2200) {
   toastText.value = message;
   clearTimeout(toastTimer);
-  toastTimer = setTimeout(() => { toastText.value = ''; }, 2200);
+  toastTimer = setTimeout(() => { toastText.value = ''; }, ms);
 }
 
 async function copyText(text) {
@@ -868,9 +868,13 @@ async function expand() {
     const cleaned = await run(data.url, true);
     if (cleaned?.ok) {
       const hops = data.hops?.length || 1;
-      toast(await copyText(cleaned.cleaned)
-        ? `已跟隨 ${hops} 次跳轉並複製`
-        : `已跟隨 ${hops} 次跳轉`);
+      const copied = await copyText(cleaned.cleaned);
+      // 半路停下來時要講清楚，不然使用者會把中間的網址當成最終結果
+      if (data.stopped) {
+        toast(`跟隨 ${hops} 次後停下：${data.stopped}，這可能不是最終網址`, 4500);
+      } else {
+        toast(copied ? `已跟隨 ${hops} 次跳轉並複製` : `已跟隨 ${hops} 次跳轉`);
+      }
     }
   } catch {
     toast('連不上還原服務，請確認網路');
@@ -881,11 +885,50 @@ async function expand() {
 
 // ---------- 離線快取 / 安裝（都要使用者自己按） ----------
 
+/** 建置時間，當版本號用（vite 建置時注入） */
+const buildTime = __BUILD_TIME__;
 /** 是否已註冊 Service Worker */
 const offline = ref(false);
+/** 有新版 Service Worker 裝好了，等使用者決定何時換過去 */
+const updateReady = ref(false);
 /** Chrome 的安裝提示事件，攔下來等使用者按按鈕才用 */
 const installPrompt = ref(null);
 const installing = ref(false);
+
+let swReg = null;
+/** 使用者按過「立即更新」才把頁面重載，第一次安裝的 claim() 不算 */
+let updating = false;
+
+/** 盯著這個註冊，有新版裝好就把按鈕亮出來 */
+function watchForUpdate(reg) {
+  swReg = reg;
+  if (reg.waiting) updateReady.value = true;
+
+  reg.addEventListener('updatefound', () => {
+    const incoming = reg.installing;
+    if (!incoming) return;
+    incoming.addEventListener('statechange', () => {
+      // 有 controller 才代表是換版；沒有的話只是第一次安裝，不用打擾使用者
+      if (incoming.state === 'installed' && navigator.serviceWorker.controller) {
+        updateReady.value = true;
+      }
+    });
+  });
+}
+
+/** 讓等待中的新版接手，接手後頁面會自己重載 */
+async function applyUpdate() {
+  const reg = swReg || await navigator.serviceWorker.getRegistration();
+  if (!reg?.waiting) return location.reload();
+  updating = true;
+  reg.waiting.postMessage({ type: 'SKIP_WAITING' });
+}
+
+if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
+  navigator.serviceWorker.addEventListener('controllerchange', () => {
+    if (updating) location.reload();
+  });
+}
 
 if (typeof window !== 'undefined') {
   window.addEventListener('beforeinstallprompt', (e) => {
@@ -931,13 +974,16 @@ async function toggleInstall() {
       await Promise.all(keys.map((k) => caches.delete(k)));
     }
     offline.value = false;
+    updateReady.value = false;
     installPrompt.value = null;
+    swReg = null;
     return toast('已移除，裝置上不再留任何東西');
   }
 
   installing.value = true;
   try {
-    await navigator.serviceWorker.register('/sw.js');
+    // updateViaCache: 'none' → 檢查更新時一定重新抓 sw.js，不吃 HTTP 快取
+    watchForUpdate(await navigator.serviceWorker.register('/sw.js', { updateViaCache: 'none' }));
     offline.value = true;
   } catch {
     installing.value = false;
@@ -996,7 +1042,12 @@ function readSharedUrl() {
 onMounted(async () => {
   // 只是讀取現況，不會主動註冊
   if ('serviceWorker' in navigator) {
-    offline.value = !!(await navigator.serviceWorker.getRegistration());
+    const reg = await navigator.serviceWorker.getRegistration();
+    offline.value = !!reg;
+    if (reg) {
+      watchForUpdate(reg);
+      reg.update().catch(() => {}); // 每次開啟主動問一次伺服器有沒有新版
+    }
   }
 
   const shared = readSharedUrl();
@@ -1142,6 +1193,13 @@ onMounted(async () => {
       清理與解包裝全部在這台裝置上完成，不會留下任何紀錄或設定。
       只有你按下「還原原始網址」時，該連結才會送到本站 Cloudflare Workers 代為跟隨跳轉。
       「安裝到這台裝置」會把 App 裝在這台裝置上，之後沒網路也能用。
+    </p>
+
+    <p class="version">
+      <span>版本 {{ buildTime }}</span>
+      <button v-if="updateReady" class="version-update" type="button" @click="applyUpdate">
+        有新版本，立即更新
+      </button>
     </p>
   </main>
 

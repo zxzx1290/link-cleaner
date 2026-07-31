@@ -9,6 +9,7 @@
 - 邊打字會即時預覽結果，但不會動到剪貼簿
 - 沒有設定畫面、沒有歷史紀錄，不寫 localStorage 也不寫 cookie
 - 頁面下方一顆「安裝到這台裝置」包辦離線與安裝，預設不開，再按一次就完全移除
+- 頁面最底下顯示版本號（建置時間），有新版時旁邊會出現「立即更新」
 
 ## 功能
 
@@ -28,8 +29,13 @@
 **還原短網址**（需連網，由自家 Worker 處理）
 - 偵測到 `bit.ly`、`t.co`、`reurl.cc`、`lihi*.cc`、`pse.is`、`shp.ee`、`vt.tiktok.com`、`b23.tv`、`xhslink.com`、Reddit `/s/`、Facebook `/share/` 等短連結時，會出現「還原原始網址」按鈕
 - 按下後由 `/api/expand` 用 `redirect: 'manual'` 一跳一跳跟到底（最多 10 跳，8 秒逾時），**不經過任何第三方解析服務**
-- 少數用 meta refresh 轉址的服務也會跟隨
-- 同一跳會用兩種 User-Agent 各試一次：Threads 的 `/share/` 對桌面瀏覽器 UA 只回空殼頁，對其他 UA 才回 302；有 WAF 的站則相反
+- 不回 3xx、改用一頁空殼頁轉址的服務也跟得到，兩種都認：`<meta http-equiv="refresh">`，以及 `reurl.cc` 那種把目的地藏在 `<input id="target">` 再由 JS 跳過去的做法（後者只接受絕對網址，避免把一般表單欄位當成轉址目標）
+- 固定以 **macOS Safari 17** 的 User-Agent 發送，每個部分都是實測挑出來的：
+  - 不帶瀏覽器 UA 常被有 WAF 的站直接擋掉
+  - Threads 的 `/share/` 對桌面 Chromium 和 Android UA 只回空殼頁，WebKit 系才回 302
+  - 手機 UA 會讓目的地站回行動版網址（Google Docs 的 `/edit` 被轉成 `/mobilebasic`），那不是使用者要的原始連結
+  - 版本號 `Version/17.6` 是**刻意留舊的**：Threads 拿 Safari 版本判斷瀏覽器能力，16.6～17.6 都回 302，18.0 起改回一頁 JS 空殼頁。那頁 259 KB 全是 React bundle，不含貼文網址、`og:url` 或 canonical，除非執行 JS 否則解析不出目的地
+  - `Intel Mac OS X 10_15_7` 同樣不是沒更新——Apple 從 macOS 11 起就把 UA 的系統版本鎖死在這串
 - 跟到目的地後又被同一個站踢回首頁 / 登入頁 / 錯誤頁時，會停在上一步（那才是真正要的網址）
 - 目的地若指向內網 / 迴環位址會直接擋掉（SSRF 防護）
 - 還原後自動再跑一次清理，因為短網址背後往往還藏著一整串追蹤參數
@@ -38,7 +44,7 @@
 
 ```
 index.html              Vite 入口
-vite.config.js          建置設定；開發時把 /api/expand 接到 Worker 的同一份程式碼
+vite.config.js          建置設定；產生版本號、開發時把 /api/expand 接到 Worker 的同一份程式碼
 wrangler.toml           Cloudflare Worker 設定（dist/ 當靜態資產）
 src/
   main.js               掛載 Vue（不自動註冊 Service Worker）
@@ -47,19 +53,39 @@ src/
 worker/
   index.js              Worker 進入點：/api/expand 之外一律交給靜態資產
   expand.js             跟隨重導向的實作（只用 Web 標準 API，可在 Node 直接跑）
+  expand.test.js        上面那支的測試（node --test，換掉全域 fetch，不連外）
 public/
   manifest.webmanifest  PWA 設定，含 share_target
-  sw.js                 Service Worker（離線快取）
+  sw.js                 Service Worker（離線快取；快取名稱的建置時間由 vite 填入）
   icons/                PWA 圖示
 tools/
   make-icons.mjs        產生 PWA 圖示（單色，與標題列的 SVG 同一組路徑）
+  expand.mjs            在命令列跑一次還原，用 Worker 的同一份程式碼
+  probe-ua.mjs          比較各種 User-Agent 對同一個網址的回應
 ```
+
+## 排查短網址還原
+
+還原壞掉時（通常是對方改了擋 UA 的規則），不用起開發伺服器，直接在命令列跑：
+
+```bash
+node tools/expand.mjs https://reurl.cc/xxxx     # 跑完整流程，印出每一跳
+node tools/probe-ua.mjs https://reurl.cc/xxxx   # 8 種 UA 各試一次，看誰過得去
+```
+
+`probe-ua.mjs` 會分辨三種轉址方式（`Location`、meta refresh、`<input id="target">`），
+所以也能用來確認某個新的短網址服務是哪一種做法。挑到合用的 UA 後，改
+`worker/expand.js` 開頭的 `USER_AGENT`。
+
+跟隨邏輯本身的迴歸測試是 `npm test`：它把全域 `fetch` 換成假的網路，
+所以不連外、跑得快，也不會因為某個短網址服務今天心情不好就紅一片。
 
 ## 開發與部署
 
 ```bash
 npm install
 npm run dev       # http://localhost:5173，/api/expand 會用 Node 跑 Worker 的同一份邏輯
+npm test          # node --test，跑 worker/expand.test.js
 npm run build     # 產出 dist/
 npm run preview   # wrangler dev：用真正的 Workers runtime 跑 dist/ + Worker
 npm run deploy    # build + wrangler deploy
@@ -101,7 +127,24 @@ const GLOBAL_RULE = { params: ['fbclid', /^utm_/i, ...] };
 { id: 'example', name: '站名', hosts: ['example.com'], params: ['tracking_id'] }
 ```
 
-改完記得調高 `public/sw.js` 的 `CACHE` 版本號，使用者才會拿到新版。
+## 版本與更新
+
+版本號就是**建置時間**（台北時區，`YYYY-MM-DD HH:MM:SS`），在 `vite.config.js` 產生後往兩個地方送：
+
+- `define` 注入 `__BUILD_TIME__`，顯示在頁面最底下
+- 建置時填進 `public/sw.js` 的快取名稱（`link-cleaner-<建置時間>`）
+
+第二點是更新機制的關鍵：瀏覽器是**逐位元組比對 sw.js** 來判斷有沒有新版的，所以 sw.js 的內容每次建置都必須不一樣。以前得手動調 `CACHE` 版本號，現在自動處理，不用再記。
+
+已安裝的使用者拿到新版的流程：
+
+1. 每次開啟 App 時前台呼叫 `registration.update()` 主動問伺服器（註冊時帶 `updateViaCache: 'none'`，不吃 HTTP 快取）
+2. 內容有變 → 新的 Service Worker 安裝完成後停在 waiting，**不會自己接手**
+3. 頁面底部亮出「有新版本，立即更新」→ 使用者按下才 `postMessage({ type: 'SKIP_WAITING' })`，新版接手後頁面重載
+
+刻意不自動換版，是因為使用者可能正在輸入或看結果；也刻意不在第一次安裝時提示（用 `navigator.serviceWorker.controller` 是否存在來區分換版與初次安裝）。
+
+沒安裝的一般瀏覽也不會卡舊版：導覽請求走 network-first，而 JS / CSS 檔名都帶 hash。
 
 ## 隱私
 

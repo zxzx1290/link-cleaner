@@ -9,6 +9,7 @@
     "build": "vite build",
     "preview": "wrangler dev",
     "deploy": "vite build && wrangler deploy",
+    "test": "node --test",
     "icons": "node tools/make-icons.mjs"
   },
   "engines": {

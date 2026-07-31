@@ -110,6 +110,28 @@ body {
   padding: 0 4px;
 }
 
+.version {
+  margin: 0;
+  display: flex;
+  gap: 10px;
+  align-items: center;
+  justify-content: center;
+  flex-wrap: wrap;
+  font-size: .75rem;
+  color: var(--muted);
+  font-variant-numeric: tabular-nums;
+}
+
+.version-update {
+  font: inherit;
+  color: var(--accent);
+  background: none;
+  border: 0;
+  padding: 2px 0;
+  cursor: pointer;
+  text-decoration: underline;
+}
+
 /* ---------- 輸入 ---------- */
 .label {
   display: block;

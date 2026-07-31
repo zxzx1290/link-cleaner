@@ -3,17 +3,22 @@
  *
  * vite build 產出的檔名都帶 hash（immutable），所以這裡不維護 precache 清單，
  * 改成執行期快取：抓過一次就留著，換版時舊檔案自然不再被請求。
+ *
+ * 快取名稱尾巴那串數字是建置時間，由 vite 在建置時填進來，有兩個作用：
+ * 1. 讓 sw.js 每次建置的內容都不同，瀏覽器才認得出「有新版」
+ * 2. 快取名稱跟著換版，activate 時舊版快取（含舊的入口頁）會被整包清掉
  */
 
-const CACHE = 'link-cleaner-v2';
+const CACHE = 'link-cleaner-__BUILD_ID__';
 
 self.addEventListener('install', (event) => {
-  // 先把入口頁抓下來，離線時才有東西可回
+  // 先把入口頁抓下來，離線時才有東西可回。
+  // 這裡刻意不呼叫 skipWaiting()：新版要等使用者在畫面上按「立即更新」才接手，
+  // 免得正在操作時腳下的檔案被換掉。第一次安裝沒有舊版佔著，不受影響。
   event.waitUntil(
     caches.open(CACHE)
       .then((cache) => cache.add('/'))
-      .catch(() => {})
-      .then(() => self.skipWaiting()),
+      .catch(() => {}),
   );
 });
 
@@ -23,6 +28,11 @@ self.addEventListener('activate', (event) => {
       .then((keys) => Promise.all(keys.filter((k) => k !== CACHE).map((k) => caches.delete(k))))
       .then(() => self.clients.claim()),
   );
+});
+
+// 使用者按下「立即更新」時，前台會送這個訊息過來
+self.addEventListener('message', (event) => {
+  if (event.data?.type === 'SKIP_WAITING') self.skipWaiting();
 });
 
 self.addEventListener('fetch', (event) => {
