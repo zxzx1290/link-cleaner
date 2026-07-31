@@ -140,7 +140,8 @@ const GLOBAL_RULE = { params: ['fbclid', /^utm_/i, ...] };
 
 1. 每次開啟 App 時前台呼叫 `registration.update()` 主動問伺服器（註冊時帶 `updateViaCache: 'none'`，不吃 HTTP 快取）
 2. 內容有變 → 新的 Service Worker 安裝完成後停在 waiting，**不會自己接手**
-3. 頁面底部亮出「有新版本，立即更新」→ 使用者按下才 `postMessage({ type: 'SKIP_WAITING' })`，新版接手後頁面重載
+3. 「安裝到這台裝置」旁邊亮出「有新版本，立即更新」→ 使用者按下才 `postMessage({ type: 'SKIP_WAITING' })`，新版接手後頁面重載
+4. 重載時在網址留 `#updated` 當旗標，新的頁面靠它知道要 toast 一句「已更新到 \<版本\>」，載入後立刻把 hash 清掉。用 hash 而不是 sessionStorage，是為了維持「不在裝置上寫任何東西」
 
 刻意不自動換版，是因為使用者可能正在輸入或看結果；也刻意不在第一次安裝時提示（用 `navigator.serviceWorker.controller` 是否存在來區分換版與初次安裝）。
 

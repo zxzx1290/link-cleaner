@@ -916,17 +916,30 @@ function watchForUpdate(reg) {
   });
 }
 
+/**
+ * 重載頁面，並在網址留一個 #updated 當旗標。
+ *
+ * 重載之後就是另一個頁面了，記憶體裡的東西都沒了，得靠這個旗標才知道要說一聲。
+ * 用 hash 而不是 sessionStorage，是為了維持「不在裝置上寫任何東西」；
+ * 它也不會送到伺服器，載入後馬上就清掉。
+ */
+function reloadAsUpdated() {
+  location.hash = 'updated'; // 只改 hash 不會重載，下一行才會，而 hash 會被保留
+  location.reload();
+}
+
 /** 讓等待中的新版接手，接手後頁面會自己重載 */
 async function applyUpdate() {
   const reg = swReg || await navigator.serviceWorker.getRegistration();
-  if (!reg?.waiting) return location.reload();
+  if (!reg?.waiting) return reloadAsUpdated();
+
   updating = true;
   reg.waiting.postMessage({ type: 'SKIP_WAITING' });
 }
 
 if (typeof navigator !== 'undefined' && 'serviceWorker' in navigator) {
   navigator.serviceWorker.addEventListener('controllerchange', () => {
-    if (updating) location.reload();
+    if (updating) reloadAsUpdated();
   });
 }
 
@@ -1040,6 +1053,12 @@ function readSharedUrl() {
 }
 
 onMounted(async () => {
+  // 剛換完版：說一聲，順手把旗標從網址上清掉
+  if (location.hash === '#updated') {
+    history.replaceState(null, '', location.pathname + location.search);
+    toast(`已更新到 ${buildTime}`, 3200);
+  }
+
   // 只是讀取現況，不會主動註冊
   if ('serviceWorker' in navigator) {
     const reg = await navigator.serviceWorker.getRegistration();
@@ -1187,6 +1206,9 @@ onMounted(async () => {
       <button class="btn small ghost" type="button" :disabled="installing" @click="toggleInstall">
         {{ installing ? '安裝中…' : (offline ? '已安裝（點此移除）' : '安裝到這台裝置') }}
       </button>
+      <button v-if="updateReady" class="btn small primary" type="button" @click="applyUpdate">
+        有新版本，立即更新
+      </button>
     </div>
 
     <p class="footnote">
@@ -1195,12 +1217,7 @@ onMounted(async () => {
       「安裝到這台裝置」會把 App 裝在這台裝置上，之後沒網路也能用。
     </p>
 
-    <p class="version">
-      <span>版本 {{ buildTime }}</span>
-      <button v-if="updateReady" class="version-update" type="button" @click="applyUpdate">
-        有新版本，立即更新
-      </button>
-    </p>
+    <p class="version">版本 {{ buildTime }}</p>
   </main>
 
   <div class="toast" :class="{ show: toastText }" role="status" aria-live="polite">{{ toastText }}</div>
