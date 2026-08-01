@@ -1,10 +1,11 @@
+import { lookup } from 'node:dns/promises';
 import { readFileSync, writeFileSync } from 'node:fs';
 import { resolve } from 'node:path';
 
 import { defineConfig } from 'vite';
 import vue from '@vitejs/plugin-vue';
 
-import { handleExpand } from './worker/expand.js';
+import { guardSameOrigin, handleExpand, isPrivateHost } from './worker/expand.js';
 
 /** 建置時間（台北時區），當作版本號用：2026-07-31 14:23:05 */
 const BUILD_TIME = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Taipei' });
@@ -12,6 +13,23 @@ const BUILD_TIME = new Date().toLocaleString('sv-SE', { timeZone: 'Asia/Taipei' 
 const BUILD_ID = BUILD_TIME.replace(/\D/g, '');
 
 const SW_SOURCE = resolve(import.meta.dirname, 'public/sw.js');
+
+/**
+ * dev 專用的 fetch：連出去之前先把主機名解析成 IP，再檢查一次。
+ *
+ * 線上不需要這層——Workers 的 fetch 出口在公網，本來就到不了 loopback 和私有網段。
+ * 但 dev server 跑在自己的機器上，那裡的 127.0.0.1 和內網是真的連得到，
+ * 少了這層的話，127.0.0.1.nip.io 這種「解析到迴環位址的公開域名」就能繞過
+ * expand.js 的字面檢查，把 /api/expand 變成一台內網掃描器（hops 還會把結果吐回去）。
+ */
+async function guardedFetch(input, init) {
+  const { hostname } = new URL(typeof input === 'string' ? input : input.url);
+  const { address } = await lookup(hostname);
+  if (isPrivateHost(address)) {
+    throw new Error(`${hostname} 解析到內部位址 ${address}，已阻擋`);
+  }
+  return fetch(input, init);
+}
 
 /**
  * 開發伺服器上重用 Worker 的 /api/expand，
@@ -25,7 +43,10 @@ function apiDev() {
         if (!req.url?.startsWith('/api/expand')) return next();
 
         const url = new URL(req.url, `http://${req.headers.host || 'localhost'}`);
-        const response = await handleExpand(new Request(url, { method: req.method }));
+        // 標頭要一起帶過去，同源檢查才看得到 Sec-Fetch-Site
+        const request = new Request(url, { method: req.method, headers: req.headers });
+        const response = guardSameOrigin(request)
+          || await handleExpand(request, { fetch: guardedFetch });
 
         res.statusCode = response.status;
         response.headers.forEach((value, key) => res.setHeader(key, value));
@@ -71,9 +92,6 @@ export default defineConfig({
   plugins: [vue(), apiDev(), swBuildStamp()],
   define: {
     __BUILD_TIME__: JSON.stringify(BUILD_TIME),
-  },
-  server: {
-    host: true, // 方便用手機連進來測分享流程
   },
   build: {
     target: 'es2022',

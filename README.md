@@ -80,11 +80,32 @@ node tools/probe-ua.mjs https://reurl.cc/xxxx   # 8 種 UA 各試一次，看誰
 跟隨邏輯本身的迴歸測試是 `npm test`：它把全域 `fetch` 換成假的網路，
 所以不連外、跑得快，也不會因為某個短網址服務今天心情不好就紅一片。
 
+## /api/expand 的濫用防護
+
+這個端點一個請求會對外跟隨最多 10 跳，本質上是個流量放大器。沒有防護的話，
+任何人都能拿它去轟第三方網站——對方看到的來源是 Cloudflare 的 IP，被投訴時
+要負責的是我們的帳號，順帶還會把免費方案的每日請求額度燒光。三道閘門由外而內：
+
+| 閘門 | 位置 | 作用 |
+| --- | --- | --- |
+| 同源檢查 | `worker/index.js` | 沒帶 `Sec-Fetch-Site: same-origin` 就回 403，濾掉 curl 和爬蟲 |
+| 速率限制 | `wrangler.toml` 的 `[[ratelimits]]` | 每個 IP 每分鐘 20 次 |
+| SSRF 檢查 | `worker/expand.js` 的 `isPrivateHost` | 擋掉指向內網、迴環、雲端 metadata 的目的地（含 `::ffff:` 這類包著 IPv4 的 IPv6 寫法） |
+
+要用命令列測這個端點，補上標頭即可：
+
+```bash
+curl -H 'sec-fetch-site: same-origin' 'http://localhost:5173/api/expand?url=https://reurl.cc/xxxx'
+```
+
+`tools/expand.mjs` 直接呼叫 `handleExpand`，不經過這些閘門，所以照舊能用。
+
 ## 開發與部署
 
 ```bash
 npm install
 npm run dev       # http://localhost:5173，/api/expand 會用 Node 跑 Worker 的同一份邏輯
+npm run dev -- --host   # 額外綁 0.0.0.0，讓手機連進來測分享流程（預設只綁 localhost）
 npm test          # node --test，跑 worker/expand.test.js
 npm run build     # 產出 dist/
 npm run preview   # wrangler dev：用真正的 Workers runtime 跑 dist/ + Worker

@@ -1,6 +1,6 @@
 {
   "name": "link-cleaner",
-  "version": "2.0.0",
+  "version": "0.0.0",
   "description": "清除連結追蹤參數並還原包裝網址的 PWA（Vue + Cloudflare Worker）",
   "type": "module",
   "private": true,

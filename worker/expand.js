@@ -12,6 +12,8 @@ const MAX_HOPS = 10;
 const TIMEOUT_MS = 8000;
 /** 讀 meta refresh 時最多讀多少內容，避免把整個大頁面吃進記憶體 */
 const MAX_HTML_BYTES = 64 * 1024;
+/** 短網址不會長成這樣，過長的多半是拿來塞爆什麼東西的 */
+const MAX_URL_LENGTH = 2048;
 
 /**
  * 跟隨跳轉時固定送出的 User-Agent：macOS 版 Safari。
@@ -33,26 +35,81 @@ const MAX_HTML_BYTES = 64 * 1024;
  */
 const USER_AGENT = 'Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.6 Safari/605.1.15';
 
-/** 擋掉指向內網、迴環位址的請求（SSRF 防護） */
-function isPrivateHost(hostname) {
+function isPrivateIPv4([a, b]) {
+  if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
+  if (a === 172 && b >= 16 && b <= 31) return true;
+  if (a === 192 && b === 168) return true;
+  if (a === 169 && b === 254) return true;
+  if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
+  return false;
+}
+
+/**
+ * 把 IPv6 展開成 8 組 16 bit 數字，格式不對就回 null。
+ *
+ * 光比對字串前綴是不夠的：URL 會把 ::ffff:127.0.0.1 正規化成 ::ffff:7f00:1，
+ * 看起來完全不像迴環位址。要正確判斷就得真的把位址解出來。
+ */
+function parseIPv6(text) {
+  let rest = text;
+
+  // 尾端的點分十進位（::ffff:127.0.0.1）先併成兩組 hextet
+  const dotted = rest.match(/^(.*:)(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
+  if (dotted) {
+    const b = dotted.slice(2).map(Number);
+    if (b.some((n) => n > 255)) return null;
+    rest = `${dotted[1]}${((b[0] << 8) | b[1]).toString(16)}:${((b[2] << 8) | b[3]).toString(16)}`;
+  }
+
+  const halves = rest.split('::');
+  if (halves.length > 2) return null;
+  const head = halves[0] ? halves[0].split(':') : [];
+  const tail = halves.length === 2 && halves[1] ? halves[1].split(':') : [];
+  const fill = halves.length === 2 ? 8 - head.length - tail.length : 0;
+  if (fill < 0 || head.length + fill + tail.length !== 8) return null;
+
+  const groups = [...head, ...Array(fill).fill('0'), ...tail]
+    .map((g) => (/^[0-9a-f]{1,4}$/.test(g) ? parseInt(g, 16) : NaN));
+  return groups.some(Number.isNaN) ? null : groups;
+}
+
+function isPrivateIPv6(groups) {
+  const [a, b] = groups;
+  if (groups.every((g) => g === 0)) return true; // ::
+  if ((a & 0xfe00) === 0xfc00) return true; // fc00::/7  ULA
+  if ((a & 0xffc0) === 0xfe80) return true; // fe80::/10 link-local
+
+  // 這幾種前綴的低 32 bit 其實包著一個 IPv4 位址（::1 也算在第一種裡），
+  // 得挖出來套 IPv4 的規則再檢查一次，否則 ::ffff:127.0.0.1 會被當成公開位址放行
+  let v4 = null;
+  if (groups.slice(0, 5).every((g) => g === 0)) v4 = [groups[6], groups[7]]; // ::x:y、::ffff:x:y
+  else if (a === 0x64 && b === 0xff9b) v4 = [groups[6], groups[7]]; // 64:ff9b::/96 NAT64
+  else if (a === 0x2002) v4 = [groups[1], groups[2]]; // 2002::/16 6to4
+  if (!v4) return false;
+
+  const [hi, lo] = v4;
+  return isPrivateIPv4([hi >> 8, hi & 0xff, lo >> 8, lo & 0xff]);
+}
+
+/**
+ * 擋掉指向內網、迴環位址的請求（SSRF 防護）
+ *
+ * 這是字面檢查，擋不掉「解析到內網的公開域名」（127.0.0.1.nip.io 之類）。
+ * 線上不需要另外處理——Workers 的 fetch 出口在公網，那種目的地本來就連不到；
+ * dev server 則在 vite.config.js 裡另外做了 DNS 解析後的檢查。
+ */
+export function isPrivateHost(hostname) {
   const h = hostname.toLowerCase().replace(/^\[|\]$/g, '');
 
   if (h === 'localhost' || /(^|\.)(local|internal|localhost|home\.arpa)$/.test(h)) return true;
 
   const v4 = h.match(/^(\d{1,3})\.(\d{1,3})\.(\d{1,3})\.(\d{1,3})$/);
-  if (v4) {
-    const [a, b] = v4.slice(1).map(Number);
-    if (a === 0 || a === 10 || a === 127 || a >= 224) return true;
-    if (a === 172 && b >= 16 && b <= 31) return true;
-    if (a === 192 && b === 168) return true;
-    if (a === 169 && b === 254) return true;
-    if (a === 100 && b >= 64 && b <= 127) return true; // CGNAT
-    return false;
-  }
+  if (v4) return isPrivateIPv4(v4.slice(1).map(Number));
 
+  // 認不出來的 IPv6 一律擋：寧可少還原一個網址，也不要放行一個看不懂的目的地
   if (h.includes(':')) {
-    if (h === '::1' || h === '::') return true;
-    return /^f[cd]/.test(h) || /^fe[89ab]/.test(h); // ULA / link-local
+    const groups = parseIPv6(h);
+    return groups === null || isPrivateIPv6(groups);
   }
 
   return false;
@@ -138,8 +195,8 @@ async function readHtmlTarget(response, currentUrl) {
 }
 
 /** 走一跳：回傳下一個網址，走不下去就回 null。 */
-async function nextHop(current, signal) {
-  const res = await fetch(current, {
+async function nextHop(current, signal, doFetch) {
+  const res = await doFetch(current, {
     method: 'GET',
     redirect: 'manual',
     signal,
@@ -196,14 +253,14 @@ function describeError(err) {
 }
 
 /** 一跳一跳跟隨到最終網址 */
-async function follow(startUrl, signal) {
+async function follow(startUrl, signal, doFetch) {
   let current = startUrl;
   const hops = [];
 
   for (let i = 0; i < MAX_HOPS; i++) {
     let hop;
     try {
-      hop = await nextHop(current, signal);
+      hop = await nextHop(current, signal, doFetch);
     } catch (err) {
       // 半路壞掉時別把前面走過的成果一起丟掉，停在這裡並說明原因
       return { url: current, hops, stopped: describeError(err) };
@@ -231,17 +288,38 @@ function json(data, status = 200) {
 }
 
 /**
+ * 擋掉不是從自家頁面發出來的請求。
+ *
+ * `Sec-Fetch-Site` 是瀏覽器自己填的，網頁上的 JS 改不掉，所以同源的 fetch 一定
+ * 帶著 same-origin；curl 或爬蟲則整個標頭都不會出現。這擋不住存心偽造標頭的人，
+ * 但足以濾掉絕大多數「順手把 /api/expand 當成免費轉址代理」的自動化流量——
+ * 那種流量才是真正會燒掉請求額度、或讓這個 Worker 被目標站當成掃描器的來源。
+ *
+ * 要用命令列測的話補上標頭即可：curl -H 'sec-fetch-site: same-origin' ...
+ *
+ * @returns {Response|null} 該擋就回 403，是自家請求則回 null
+ */
+export function guardSameOrigin(request) {
+  if (request.headers.get('sec-fetch-site') === 'same-origin') return null;
+  return json({ ok: false, error: '這個 API 只給本站頁面使用' }, 403);
+}
+
+/**
  * GET /api/expand?url=<短網址>
  * @param {Request} request
+ * @param {{ fetch?: typeof fetch }} [options] 覆寫對外的 fetch（dev server 用來多做一層檢查）
  * @returns {Promise<Response>}
  */
-export async function handleExpand(request) {
+export async function handleExpand(request, options = {}) {
+  const doFetch = options.fetch || ((...args) => globalThis.fetch(...args));
+
   if (request.method !== 'GET') {
     return json({ ok: false, error: '只接受 GET' }, 405);
   }
 
   const target = new URL(request.url).searchParams.get('url');
   if (!target) return json({ ok: false, error: '缺少 url 參數' }, 400);
+  if (target.length > MAX_URL_LENGTH) return json({ ok: false, error: '網址過長' }, 414);
 
   const checked = checkTarget(target);
   if (!checked.ok) return json({ ok: false, error: checked.error }, 400);
@@ -251,17 +329,19 @@ export async function handleExpand(request) {
     return json({ ok: false, error: '這是本站網址，不需要還原' }, 400);
   }
 
+  const start = checked.url.toString();
   const controller = new AbortController();
   const timer = setTimeout(() => controller.abort(), TIMEOUT_MS);
 
   try {
-    const result = await follow(checked.url.toString(), controller.signal);
-    if (result.url === checked.url.toString()) {
+    const result = await follow(start, controller.signal, doFetch);
+    if (result.url === start) {
       return json({
         ok: false,
         error: result.stopped || '這個連結沒有再跳轉，已經是最終網址',
       });
     }
+
     return json({ ok: true, url: result.url, hops: result.hops, stopped: result.stopped });
   } catch (err) {
     if (err?.name === 'AbortError' || err?.name === 'TimeoutError') {

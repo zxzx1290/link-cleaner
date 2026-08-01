@@ -9,7 +9,7 @@
 import { test, describe, afterEach } from 'node:test';
 import assert from 'node:assert/strict';
 
-import { handleExpand } from './expand.js';
+import { guardSameOrigin, handleExpand, isPrivateHost } from './expand.js';
 
 const realFetch = globalThis.fetch;
 afterEach(() => { globalThis.fetch = realFetch; });
@@ -227,6 +227,45 @@ describe('SSRF 防護', () => {
     const result = await expand('https://172.32.0.1/');
     assert.equal(result.status, 200);
   });
+
+  // URL 會把這些正規化成看不出原形的樣子，光比對字串前綴會全部漏掉
+  for (const host of [
+    '[::ffff:127.0.0.1]', // IPv4-mapped，正規化後長成 ::ffff:7f00:1
+    '[::ffff:169.254.169.254]', // 同上，指向雲端 metadata 位址
+    '[::ffff:192.168.0.1]',
+    '[::127.0.0.1]', // 舊的 IPv4-compatible 寫法
+    '[64:ff9b::127.0.0.1]', // NAT64
+    '[2002:7f00:1::]', // 6to4 包著 127.0.0.1
+    '[0:0:0:0:0:0:0:1]', // 展開寫法的 ::1
+    '[fd00::1]', // ULA
+    '[fe80::1]', // link-local
+  ]) {
+    test(`擋掉 ${host}`, async () => {
+      mockNetwork({});
+      const result = await expand(`http://${host}/`);
+      assert.equal(result.status, 400);
+      assert.match(result.error, /內部網段/);
+    });
+  }
+
+  test('放行一般的公開 IPv6', async () => {
+    mockNetwork({ 'https://[2001:4860:4860::8888]/': html('') });
+    const result = await expand('https://[2001:4860:4860::8888]/');
+    assert.equal(result.status, 200);
+  });
+
+  test('解析不出來的 IPv6 一律當成內網擋掉', () => {
+    for (const bad of ['1:2:3::4::5', 'gggg::1', '1:2:3:4:5:6:7:8:9']) {
+      assert.equal(isPrivateHost(bad), true, bad);
+    }
+  });
+
+  test('十進位／八進位／簡寫的 IPv4 也擋得住', () => {
+    // 這些是 new URL 先正規化成點分十進位，不是這裡自己處理的，加測試釘住這個前提
+    for (const raw of ['2130706433', '0177.0.0.1', '0x7f.0.0.1', '127.1']) {
+      assert.equal(isPrivateHost(new URL(`http://${raw}/`).hostname), true, raw);
+    }
+  });
 });
 
 describe('參數檢查', () => {
@@ -251,4 +290,31 @@ describe('參數檢查', () => {
     assert.equal(result.status, 400);
     assert.match(result.error, /本站網址/);
   });
+
+  test('擋掉過長的 url', async () => {
+    const result = await expand(`https://short.test/${'a'.repeat(3000)}`);
+    assert.equal(result.status, 414);
+  });
+});
+
+describe('同源檢查', () => {
+  const guard = (headers) => guardSameOrigin(
+    new Request('https://link-cleaner.test/api/expand?url=x', { headers }),
+  );
+
+  test('自家頁面發的請求放行', () => {
+    assert.equal(guard({ 'sec-fetch-site': 'same-origin' }), null);
+  });
+
+  for (const [name, headers] of [
+    ['沒有 Sec-Fetch-Site 的請求（curl、腳本）', {}],
+    ['別的網站發的 fetch', { 'sec-fetch-site': 'cross-site' }],
+    ['直接在網址列打開', { 'sec-fetch-site': 'none' }],
+  ]) {
+    test(`擋掉${name}`, async () => {
+      const response = guard(headers);
+      assert.equal(response.status, 403);
+      assert.match((await response.json()).error, /只給本站頁面/);
+    });
+  }
 });
