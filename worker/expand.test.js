@@ -102,6 +102,19 @@ describe('空殼頁轉址', () => {
     assert.equal(result.hops[0].status, 'meta refresh');
   });
 
+  test('目的地自己帶著 share_url= 參數時，不會抓錯（Facebook 的 /share/p/）', async () => {
+    const target = 'https://www.facebook.test/story.php?story_fbid=1&id=2&share_url=https%3A%2F%2Fwww.facebook.test%2Fshare%2Fp%2Fabc%2F';
+    mockNetwork({
+      'https://www.facebook.test/share/p/abc/': html(
+        `<head><meta http-equiv="refresh" content="0;url=${target.replace(/&/g, '&amp;')}" /></head>`,
+      ),
+      [target]: html('<p>到站</p>'),
+    });
+
+    const result = await expand('https://www.facebook.test/share/p/abc/');
+    assert.equal(result.url, target);
+  });
+
   test('認得藏在 hidden input 的目的地，並還原 &amp;', async () => {
     mockNetwork({
       'https://short.test/a': html('<body><input type="hidden" id="target" value="https://final.test/c?a=1&amp;b=2"></body>'),

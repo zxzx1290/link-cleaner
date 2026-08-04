@@ -148,9 +148,13 @@ function decodeEntities(text) {
  *    再由頁面上的 JS 讀出來跳過去（順便讓那頁的追蹤碼有機會執行）
  */
 function findTargetInHtml(html) {
-  const meta = html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["'][^"']*url=([^"';]+)/i);
-  if (meta) {
-    return { raw: decodeEntities(meta[1].trim().replace(/^['"]|['"]$/g, '')), via: 'meta refresh' };
+  const meta = html.match(/<meta[^>]+http-equiv=["']?refresh["']?[^>]*content=["']([^"']*)["']/i);
+  // content 長成「秒數; url=目的地」，所以 url= 前面只會是開頭、分號或空白。
+  // 一定要比對邊界：目的地本身的查詢字串常常也有 xxx_url=（Facebook 的 share_url=
+  // 就是），不設邊界的話會抓到最後那個，還原出來的網址就整個歪掉
+  const url = meta?.[1].match(/(?:^|[;,\s])\s*url\s*=\s*(.+)$/i);
+  if (url) {
+    return { raw: decodeEntities(url[1].trim().replace(/^['"]|['"]$/g, '')), via: 'meta refresh' };
   }
 
   const input = html.match(/<input[^>]*\bid=["']?target["']?[^>]*>/i);
